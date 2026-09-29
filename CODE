@@ -1,0 +1,229 @@
+#define BLYNK_TEMPLATE_ID "TMPL38aA8g3EP"
+#define BLYNK_TEMPLATE_NAME "Portable Abs Trainer"
+#define BLYNK_AUTH_TOKEN "uOtF1G4z2LD92j_qU2wMbT0_NSrr4SDF"
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+
+// Wi-Fi Credentials
+char auth[] = BLYNK_AUTH_TOKEN;
+char ssid[] = "ABS";     // WiFi Name
+char pass[] = "12345678"; // WiFi Password
+
+// Pins
+#define TRIG_PIN 25
+#define ECHO_PIN 35
+#define BUZZER_PIN 13
+
+#define DETECT_DISTANCE 25
+
+// App Settings
+int targetReps = 10;
+int totalSets = 2;
+
+// Counters
+int currentRep = 0;
+int setsCompleted = 0;
+int totalRepsCompleted = 0;
+
+bool obstacleDetected = false;
+bool workoutActive = false;
+
+// Rest Timer
+bool isResting = false;
+unsigned long restStartTime = 0;
+const unsigned long REST_DURATION = 60000; // 1 Minute Rest (60,000 ms)
+
+BlynkTimer timer;
+
+// Ultrasonic Sensor Function
+float getDistanceCM() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+  if (duration == 0) return -1;
+
+  return duration * 0.0343 / 2.0;
+}
+
+void buzzerOn()  { digitalWrite(BUZZER_PIN, HIGH); }
+void buzzerOff() { digitalWrite(BUZZER_PIN, LOW); }
+
+// Reset All Zeros
+void resetAllData() {
+  currentRep = 0;
+  setsCompleted = 0;
+  totalRepsCompleted = 0;
+  isResting = false;
+
+  Blynk.virtualWrite(V3, 0); // Current Rep = 0
+  Blynk.virtualWrite(V4, 0); // Sets Completed = 0
+  Blynk.virtualWrite(V5, 0); // Total Completed Reps = 0
+  Blynk.virtualWrite(V6, "STOPPED / READY");
+  
+  Blynk.setProperty(V7, "color", "#FF0000"); // Red Light
+  Blynk.virtualWrite(V7, 255);
+}
+
+// BLYNK APP CONTROLS
+BLYNK_WRITE(V0) { // START / STOP SWITCH
+  int value = param.asInt();
+  
+  if (value == 1) { // START
+    workoutActive = true;
+    currentRep = 0;
+    setsCompleted = 0;
+    totalRepsCompleted = 0;
+    isResting = false;
+
+    Blynk.virtualWrite(V3, currentRep);
+    Blynk.virtualWrite(V4, setsCompleted);
+    Blynk.virtualWrite(V5, totalRepsCompleted);
+    
+    Blynk.virtualWrite(V6, "SET 1 STARTED");
+    Blynk.setProperty(V7, "color", "#00FF00"); // Green Light
+    Blynk.virtualWrite(V7, 255);
+
+    Serial.println("WORKOUT STARTED");
+  } 
+  else { // STOP
+    workoutActive = false;
+    buzzerOff();
+    resetAllData();
+    Serial.println("WORKOUT STOPPED - RESET TO 0");
+  }
+}
+
+BLYNK_WRITE(V1) { targetReps = param.asInt(); }
+BLYNK_WRITE(V2) { totalSets = param.asInt(); }
+
+BLYNK_CONNECTED() {
+  Blynk.syncVirtual(V0, V1, V2);
+  resetAllData();
+}
+
+// MAIN WORKOUT LOOP
+void processWorkout() {
+  if (!workoutActive) return;
+
+  // ----------------------------------------
+  // 1-MINUTE REST TIMER LOGIC & NOTIFICATION
+  // ----------------------------------------
+  if (isResting) {
+    unsigned long elapsed = millis() - restStartTime;
+    
+    if (elapsed < REST_DURATION) {
+      return; // Rest Progressing
+    } else {
+      // 1 Min Completed -> Start Next Set
+      isResting = false;
+      currentRep = 0;
+
+      int currentSetNumber = setsCompleted + 1;
+      
+      String statusStr = "SET " + String(currentSetNumber) + " STARTED";
+      Blynk.virtualWrite(V6, statusStr);
+      Blynk.virtualWrite(V3, currentRep);
+
+      Blynk.setProperty(V7, "color", "#00FF00"); // Green LED
+      Blynk.virtualWrite(V7, 255);
+
+      // ------------------------------------
+      // PUSH NOTIFICATION TO PHONE
+      // ------------------------------------
+      String notifMsg = "GET READY BUDDY FOR SET " + String(currentSetNumber) + "!";
+      Blynk.logEvent("next_set_alert", notifMsg);
+
+      // 1 SECOND BUZZER
+      buzzerOn();
+      delay(1000);
+      buzzerOff();
+
+      Serial.println(statusStr);
+      return;
+    }
+  }
+
+  // ----------------------------------------
+  // SENSOR DETECT LOGIC
+  // ----------------------------------------
+  float distance = getDistanceCM();
+
+  if (distance > 0 && distance <= DETECT_DISTANCE && !obstacleDetected) {
+    obstacleDetected = true;
+    
+    currentRep++;
+    totalRepsCompleted++;
+
+    Blynk.virtualWrite(V3, currentRep);
+    Blynk.virtualWrite(V5, totalRepsCompleted);
+
+    // SET COMPLETED
+    if (currentRep >= targetReps) {
+      setsCompleted++;
+      Blynk.virtualWrite(V4, setsCompleted);
+
+      // 3 SECOND BUZZER
+      buzzerOn();
+      delay(3000);
+      buzzerOff();
+
+      // ALL SETS FINISHED?
+      if (setsCompleted >= totalSets) {
+        workoutActive = false;
+        
+        Blynk.virtualWrite(V0, 0); 
+        Blynk.virtualWrite(V6, "ALL SETS COMPLETED!");
+        Blynk.setProperty(V7, "color", "#FF0000"); // Red LED
+        Blynk.virtualWrite(V7, 255);
+
+        // Final Completion Notification
+        Blynk.logEvent("next_set_alert", "CONGRATS BUDDY! ALL SETS COMPLETED!");
+
+        Serial.println("ALL SETS FINISHED!");
+        return;
+      }
+
+      // START REST TIME
+      isResting = true;
+      restStartTime = millis();
+
+      String restMsg = "SET " + String(setsCompleted) + " FINISHED - REST TIME (1 MIN)";
+      Blynk.virtualWrite(V6, restMsg);
+
+      Blynk.setProperty(V7, "color", "#FFFF00"); // Yellow LED during rest
+      Blynk.virtualWrite(V7, 255);
+
+      Serial.println(restMsg);
+    }
+  }
+
+  if (distance > DETECT_DISTANCE && obstacleDetected) {
+    obstacleDetected = false;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  digitalWrite(TRIG_PIN, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  Blynk.begin(auth, ssid, pass);
+
+  timer.setInterval(100L, processWorkout);
+}
+
+void loop() {
+  Blynk.run();
+  timer.run();
+}
